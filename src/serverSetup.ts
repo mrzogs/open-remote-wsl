@@ -153,7 +153,8 @@ async function resolveLocalArchivePath(wslManager: WSLManager, distroName: strin
         return undefined;
     }
 
-    const pathResult = await wslManager.exec('wslpath', ['-a', '-u', windowsPath], distroName);
+    const portableWindowsPath = windowsPath.replace(/\\/g, '/');
+    const pathResult = await wslManager.exec('wslpath', ['-a', '-u', portableWindowsPath], distroName);
     const { exitCode: pathExitCode } = await pathResult.exitPromise;
     const localPath = pathResult.stdout.trim();
     if (pathExitCode || !localPath) {
