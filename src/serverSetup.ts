@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import Log from './common/logger';
 import { getVSCodeServerConfig } from './serverConfig';
 import { WSLManager } from './wsl/wslManager';
@@ -14,6 +15,7 @@ export interface ServerInstallOptions {
     serverApplicationName: string;
     serverDataFolderName: string;
     serverDownloadUrlTemplate: string;
+    serverLocalArchivePath?: string;
 }
 
 export interface ServerInstallResult {
@@ -40,6 +42,12 @@ export async function installCodeServer(wslManager: WSLManager, distroName: stri
     const scriptId = crypto.randomBytes(12).toString('hex');
 
     const vscodeServerConfig = await getVSCodeServerConfig();
+    const serverLocalArchivePath = await resolveLocalArchivePath(
+        wslManager,
+        distroName,
+        vscodeServerConfig.serverLocalArchivePathTemplate,
+        logger
+    );
     const installOptions: ServerInstallOptions = {
         id: scriptId,
         version: vscodeServerConfig.version,
@@ -51,6 +59,7 @@ export async function installCodeServer(wslManager: WSLManager, distroName: stri
         serverApplicationName: vscodeServerConfig.serverApplicationName,
         serverDataFolderName: vscodeServerConfig.serverDataFolderName,
         serverDownloadUrlTemplate: serverDownloadUrlTemplate || vscodeServerConfig.serverDownloadUrlTemplate || DEFAULT_DOWNLOAD_URL_TEMPLATE,
+        serverLocalArchivePath,
     };
 
     const installServerScript = generateBashInstallScript(installOptions);
@@ -103,6 +112,58 @@ export async function installCodeServer(wslManager: WSLManager, distroName: stri
     };
 }
 
+function shellQuote(value: string): string {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function normalizeServerArch(machine: string): string | undefined {
+    switch (machine.trim()) {
+        case 'x86_64':
+        case 'amd64':
+            return 'x64';
+        case 'arm64':
+        case 'aarch64':
+            return 'arm64';
+        case 'armv7l':
+        case 'armv8l':
+            return 'armhf';
+        default:
+            return undefined;
+    }
+}
+
+async function resolveLocalArchivePath(wslManager: WSLManager, distroName: string, template: string | undefined, logger: Log): Promise<string | undefined> {
+    if (!template) {
+        return undefined;
+    }
+
+    const architectureResult = await wslManager.exec('uname', ['-m'], distroName);
+    const { exitCode: architectureExitCode } = await architectureResult.exitPromise;
+    const architecture = normalizeServerArch(architectureResult.stdout);
+    if (architectureExitCode || !architecture) {
+        logger.trace(`Could not resolve a bundled server archive architecture from '${architectureResult.stdout.trim()}'`);
+        return undefined;
+    }
+
+    const windowsPath = template
+        .replace(/\$\{os\}/g, 'linux')
+        .replace(/\$\{arch\}/g, architecture);
+    if (!fs.existsSync(windowsPath)) {
+        logger.trace(`Bundled server archive not found for linux-${architecture}`);
+        return undefined;
+    }
+
+    const pathResult = await wslManager.exec('wslpath', ['-a', '-u', windowsPath], distroName);
+    const { exitCode: pathExitCode } = await pathResult.exitPromise;
+    const localPath = pathResult.stdout.trim();
+    if (pathExitCode || !localPath) {
+        logger.trace(`Could not translate bundled server archive path: ${pathResult.stderr}`);
+        return undefined;
+    }
+
+    return localPath;
+}
+
 function parseServerInstallOutput(str: string, scriptId: string): { [k: string]: string } | undefined {
     const startResultStr = `${scriptId}: start`;
     const endResultStr = `${scriptId}: end`;
@@ -129,7 +190,7 @@ function parseServerInstallOutput(str: string, scriptId: string): { [k: string]:
     return resultMap;
 }
 
-function generateBashInstallScript({ id, quality, version, commit, release, extensionIds, envVariables, serverApplicationName, serverDataFolderName, serverDownloadUrlTemplate }: ServerInstallOptions) {
+function generateBashInstallScript({ id, quality, version, commit, release, extensionIds, envVariables, serverApplicationName, serverDataFolderName, serverDownloadUrlTemplate, serverLocalArchivePath }: ServerInstallOptions) {
     const extensions = extensionIds.map(id => '--install-extension ' + id).join(' ');
     return `
 # Server installation script
@@ -154,6 +215,7 @@ SERVER_OS=
 SERVER_ARCH=
 SERVER_CONNECTION_TOKEN=
 SERVER_DOWNLOAD_URL=
+SERVER_LOCAL_ARCHIVE_PATH=${shellQuote(serverLocalArchivePath ?? '')}
 
 LISTENING_ON=
 OS_RELEASE_ID=
@@ -235,7 +297,9 @@ if [[ ! -f $SERVER_SCRIPT ]]; then
 
     pushd $SERVER_DIR > /dev/null
 
-    if [[ ! -z $(which wget) ]]; then
+    if [[ -n "$SERVER_LOCAL_ARCHIVE_PATH" && -f "$SERVER_LOCAL_ARCHIVE_PATH" ]]; then
+        cp "$SERVER_LOCAL_ARCHIVE_PATH" vscode-server.tar.gz
+    elif [[ ! -z $(which wget) ]]; then
         wget --tries=3 --timeout=10 --continue --no-verbose -O vscode-server.tar.gz $SERVER_DOWNLOAD_URL
     elif [[ ! -z $(which curl) ]]; then
         curl --retry 3 --connect-timeout 10 --location --show-error --silent --output vscode-server.tar.gz $SERVER_DOWNLOAD_URL

@@ -20,10 +20,12 @@ export interface IServerConfig {
     serverApplicationName: string;
     serverDataFolderName: string;
     serverDownloadUrlTemplate?: string; // vscodium-like specific
+    serverLocalArchivePathTemplate?: string;
 }
 
 export async function getVSCodeServerConfig(): Promise<IServerConfig> {
     const productJson = await getVSCodeProductJson();
+    const localArchivePath = productJson.serverLocalArchivePath as string | undefined;
 
     return {
         version: vscode.version.replace('-insider',''),
@@ -32,6 +34,9 @@ export async function getVSCodeServerConfig(): Promise<IServerConfig> {
         release: productJson.release,
         serverApplicationName: productJson.serverApplicationName,
         serverDataFolderName: productJson.serverDataFolderName,
-        serverDownloadUrlTemplate: productJson.serverDownloadUrlTemplate
+        serverDownloadUrlTemplate: productJson.serverDownloadUrlTemplate,
+        serverLocalArchivePathTemplate: localArchivePath
+            ? path.resolve(vscode.env.appRoot, localArchivePath)
+            : undefined
     };
 }
